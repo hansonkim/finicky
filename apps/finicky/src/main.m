@@ -257,7 +257,7 @@
     NSString *urlString = [fileURL absoluteString];
 
     // Handle the file URL the same way we handle other URLs
-    HandleURL((char*)[urlString UTF8String], NULL, NULL, NULL, NULL, false);
+    HandleURL((char*)[urlString UTF8String], NULL, NULL, NULL, NULL, false, 0);
 
     return true;
 }
@@ -276,6 +276,7 @@
     self.receivedURL = true;
 
     NSRunningApplication *frontApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
+    int sourceApplicationPID = [frontApp processIdentifier];
 
     // Assume Finicky is in front if we are not keeping running, since there's no good way
     // to detect if Finicky was launched in the background
@@ -284,6 +285,7 @@
     char *windowTitle = NULL;
 
     if (application) {
+        sourceApplicationPID = [application processIdentifier];
         NSString *appName = [application localizedName];
         NSString *appBundleID = [application bundleIdentifier];
         NSString *appPath = [[application bundleURL] path];
@@ -314,7 +316,7 @@
     }
 
     // If Finicky isn't frontmost, we take that to mean that the browser should, by default, be opened in the background
-    HandleURL((char*)url, (char*)name, (char*)bundleId, (char*)path, windowTitle, !finickyIsInFront);
+    HandleURL((char*)url, (char*)name, (char*)bundleId, (char*)path, windowTitle, !finickyIsInFront, sourceApplicationPID);
     free(windowTitle);
 }
 
@@ -332,8 +334,53 @@
         return false;
     }
 
-    HandleURL((char*)[[url absoluteString] UTF8String], NULL, NULL, NULL, NULL, false);
+    HandleURL((char*)[[url absoluteString] UTF8String], NULL, NULL, NULL, NULL, false, 0);
     return true;
+}
+
+void RestoreFrontmostApplication(int pid, const char *targetBundleID) {
+    if (pid <= 0 || targetBundleID == NULL) {
+        return;
+    }
+
+    NSString *targetBundleIdentifier = [NSString stringWithUTF8String:targetBundleID];
+    if (targetBundleIdentifier.length == 0) {
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSRunningApplication *sourceApplication = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+        if (!sourceApplication || sourceApplication.terminated || [sourceApplication.bundleIdentifier isEqualToString:targetBundleIdentifier]) {
+            return;
+        }
+
+        void (^restoreSourceApplication)(void) = ^{
+            if (!sourceApplication.terminated) {
+                [sourceApplication activateWithOptions:0];
+            }
+        };
+
+        NSRunningApplication *frontmostApplication = [NSWorkspace sharedWorkspace].frontmostApplication;
+        if ([frontmostApplication.bundleIdentifier isEqualToString:targetBundleIdentifier]) {
+            restoreSourceApplication();
+            return;
+        }
+
+        NSNotificationCenter *workspaceNotificationCenter = [NSWorkspace sharedWorkspace].notificationCenter;
+        __block id activationObserver = [workspaceNotificationCenter addObserverForName:NSWorkspaceDidActivateApplicationNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *notification) {
+            NSRunningApplication *activatedApplication = notification.userInfo[NSWorkspaceApplicationKey];
+            if ([activatedApplication.bundleIdentifier isEqualToString:targetBundleIdentifier]) {
+                restoreSourceApplication();
+            }
+        }];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (activationObserver) {
+                [workspaceNotificationCenter removeObserver:activationObserver];
+                activationObserver = nil;
+            }
+        });
+    });
 }
 
 - (void)application:(NSApplication *)application didFailToContinueUserActivityWithType:(NSString *)userActivityType error:(NSError *)error {

@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"slices"
+	"strings"
 
 	"al.essio.dev/pkg/shellescape"
 	"finicky/util"
@@ -40,7 +40,7 @@ type browserInfo struct {
 	Type              string `json:"type"`
 }
 
-func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault bool) error {
+func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault bool, restoreSourceApp func(string)) error {
 	if config.AppType == "none" {
 		slog.Info("AppType is 'none', not launching any browser")
 		return nil
@@ -48,55 +48,152 @@ func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault 
 
 	slog.Info("Starting browser", "name", config.Name, "url", config.URL)
 
-	var openArgs []string
-
-	if config.AppType == "bundleId" {
-		openArgs = []string{"-b", config.Name}
-	} else {
-		openArgs = []string{"-a", config.Name}
+	profileArgs, profileFound := resolveBrowserProfileArgs(config.Name, config.Profile)
+	if config.Profile != "" && !profileFound {
+		return fmt.Errorf("requested browser profile could not be resolved")
 	}
-
-	var openInBackground bool = openInBackgroundByDefault
-
-	if config.OpenInBackground != nil {
-		openInBackground = *config.OpenInBackground
-	}
-
-	if openInBackground {
-		openArgs = append(openArgs, "-g")
-	}
-
-	// Handle profile and custom args
-	profileArgs, ok := resolveBrowserProfileArgs(config.Name, config.Profile)
-	hasCustomArgs := len(config.Args) > 0
-
-	// Add -n flag if profile is used (required for profile switching)
-	if ok {
-		openArgs = append(openArgs, "-n")
-	}
-
-	// Add --args if we have profile args or custom args
-	if ok || hasCustomArgs {
-		if ! slices.Contains(config.Args, "--args") {
-			openArgs = append(openArgs, "--args")
+	openInBackground := shouldOpenInBackground(config, openInBackgroundByDefault)
+	if profileFound {
+		if !openInBackground {
+			restoreSourceApp = nil
 		}
-		// Add profile arguments first if present
-		if ok {
-			openArgs = append(openArgs, profileArgs...)
-		}
-
-		// Add custom args or URL
-		if hasCustomArgs {
-			openArgs = append(openArgs, config.Args...)
-		} else {
-			openArgs = append(openArgs, config.URL)
-		}
-	} else {
-		// No special args, just add the URL
-		openArgs = append(openArgs, config.URL)
+		return launchProfileBrowser(config, dryRun, profileArgs, restoreSourceApp)
 	}
 
+	openArgs := buildOpenArgs(config, openInBackground)
 	cmd := exec.Command("open", openArgs...)
+	return runOpenCommand(cmd, dryRun)
+}
+
+func launchProfileBrowser(config BrowserConfig, dryRun bool, profileArgs []string, restoreSourceApp func(string)) error {
+	bundlePath, err := profileBrowserBundlePath(config)
+	if err != nil {
+		return err
+	}
+	bundleID := ""
+	if restoreSourceApp != nil {
+		bundleID, err = appBundleIdentifier(bundlePath)
+		if err != nil {
+			return err
+		}
+	}
+	executable, err := profileBrowserExecutable(bundlePath)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(executable, buildProfileLaunchArgs(config, profileArgs)...)
+	prettyCmd := formatCommand(cmd.Path, cmd.Args)
+	if dryRun {
+		slog.Debug("Would run command (dry run)", "command", prettyCmd)
+		return nil
+	}
+
+	slog.Debug("Run command", "command", prettyCmd)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if restoreSourceApp != nil {
+		restoreSourceApp(bundleID)
+	}
+
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			slog.Error("Browser process exited with error", "error", err)
+		}
+	}()
+
+	return nil
+}
+
+func profileBrowserExecutable(bundlePath string) (string, error) {
+	executable, err := appBundleExecutablePath(bundlePath)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		return "", fmt.Errorf("could not find browser executable for profile launch: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("browser executable for profile launch is a directory")
+	}
+	return executable, nil
+}
+
+func profileBrowserBundlePath(config BrowserConfig) (string, error) {
+	if filepath.Ext(config.Name) == ".app" {
+		return config.Name, nil
+	}
+
+	candidates := []string{filepath.Join("/Applications", config.Name+".app")}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(homeDir, "Applications", config.Name+".app"))
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+
+	query := fmt.Sprintf("kMDItemDisplayName == %q", config.Name)
+	if config.AppType == "bundleId" {
+		query = fmt.Sprintf("kMDItemCFBundleIdentifier == %q", config.Name)
+	}
+	output, err := exec.Command("mdfind", query).Output()
+	if err != nil {
+		return "", fmt.Errorf("could not find browser application for profile launch: %w", err)
+	}
+	for _, candidate := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if filepath.Ext(candidate) == ".app" {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find browser application for profile launch")
+}
+
+func appBundleExecutablePath(bundlePath string) (string, error) {
+	name, err := appBundleInfoValue(bundlePath, "CFBundleExecutable")
+	if err != nil {
+		return "", err
+	}
+	if name == "" || filepath.Base(name) != name {
+		return "", fmt.Errorf("browser executable metadata is invalid")
+	}
+	return filepath.Join(bundlePath, "Contents", "MacOS", name), nil
+}
+
+func appBundleIdentifier(bundlePath string) (string, error) {
+	return appBundleInfoValue(bundlePath, "CFBundleIdentifier")
+}
+
+func appBundleInfoValue(bundlePath string, key string) (string, error) {
+	infoPath := filepath.Join(bundlePath, "Contents", "Info.plist")
+	output, err := exec.Command("plutil", "-extract", key, "raw", "-o", "-", infoPath).Output()
+	if err != nil {
+		return "", fmt.Errorf("could not read browser bundle metadata: %w", err)
+	}
+	value := strings.TrimSpace(string(output))
+	if value == "" {
+		return "", fmt.Errorf("browser bundle metadata is empty")
+	}
+	return value, nil
+}
+
+func buildProfileLaunchArgs(config BrowserConfig, profileArgs []string) []string {
+	args := append([]string{}, profileArgs...)
+	for _, arg := range config.Args {
+		if arg != "--args" {
+			args = append(args, arg)
+		}
+	}
+	if len(config.Args) == 0 {
+		args = append(args, config.URL)
+	}
+	return args
+}
+
+func runOpenCommand(cmd *exec.Cmd, dryRun bool) error {
 
 	// Pretty print the command with proper escaping
 	prettyCmd := formatCommand(cmd.Path, cmd.Args)
@@ -147,6 +244,37 @@ func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault 
 	return nil
 }
 
+func shouldOpenInBackground(config BrowserConfig, openInBackgroundByDefault bool) bool {
+	if config.OpenInBackground != nil {
+		return *config.OpenInBackground
+	}
+	return openInBackgroundByDefault
+}
+
+func buildOpenArgs(config BrowserConfig, openInBackground bool) []string {
+	var openArgs []string
+	switch config.AppType {
+	case "bundleId":
+		openArgs = []string{"-b", config.Name}
+	default:
+		openArgs = []string{"-a", config.Name}
+	}
+
+	if openInBackground {
+		openArgs = append(openArgs, "-g")
+	}
+
+	hasCustomArgs := len(config.Args) > 0
+	if hasCustomArgs {
+		if !slices.Contains(config.Args, "--args") {
+			openArgs = append(openArgs, "--args")
+		}
+		return append(openArgs, config.Args...)
+	}
+
+	return append(openArgs, config.URL)
+}
+
 func resolveBrowserProfileArgs(identifier string, profile string) ([]string, bool) {
 	var browsersJson []browserInfo
 	if err := json.Unmarshal(browsersJsonData, &browsersJson); err != nil {
@@ -156,9 +284,9 @@ func resolveBrowserProfileArgs(identifier string, profile string) ([]string, boo
 
 	// Try to find matching browser by bundle ID
 	var matchedBrowser *browserInfo
-	for _, browser := range browsersJson {
-		if browser.ID == identifier || browser.AppName == identifier {
-			matchedBrowser = &browser
+	for i := range browsersJson {
+		if matchesBrowser(browsersJson[i], identifier) {
+			matchedBrowser = &browsersJson[i]
 			break
 		}
 	}
@@ -201,6 +329,13 @@ func resolveBrowserProfileArgs(identifier string, profile string) ([]string, boo
 	}
 
 	return nil, false
+}
+
+func matchesBrowser(browser browserInfo, identifier string) bool {
+	if browser.ID == identifier || browser.AppName == identifier {
+		return true
+	}
+	return filepath.Ext(identifier) == ".app" && strings.TrimSuffix(filepath.Base(identifier), ".app") == browser.AppName
 }
 
 func readFirefoxProfileNames(profilesIniPath string) []string {
@@ -349,7 +484,7 @@ func GetProfilesForBrowser(identifier string) []string {
 
 	var matchedBrowser *browserInfo
 	for i := range browsersJson {
-		if browsersJson[i].ID == identifier || browsersJson[i].AppName == identifier {
+		if matchesBrowser(browsersJson[i], identifier) {
 			matchedBrowser = &browsersJson[i]
 			break
 		}

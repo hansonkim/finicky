@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/dop251/goja"
 )
@@ -39,9 +40,10 @@ type UpdateInfo struct {
 }
 
 type URLInfo struct {
-	URL              string
-	Opener           *resolver.OpenerInfo
-	OpenInBackground bool
+	URL                  string
+	Opener               *resolver.OpenerInfo
+	OpenInBackground     bool
+	SourceApplicationPID int32
 }
 
 type ConfigInfo struct {
@@ -196,7 +198,14 @@ func main() {
 				} else {
 					lastError = nil
 				}
-				if launchErr := browser.LaunchBrowser(*config, dryRun, urlInfo.OpenInBackground); launchErr != nil {
+				var restoreSourceApp func(string)
+				if urlInfo.OpenInBackground && urlInfo.SourceApplicationPID > 0 {
+					restoreSourceApp = func(browserBundleID string) {
+						slog.Debug("Restoring source application after profile launch", "sourceApplicationPID", urlInfo.SourceApplicationPID, "browserBundleID", browserBundleID)
+						restoreFrontmostApplication(urlInfo.SourceApplicationPID, browserBundleID)
+					}
+				}
+				if launchErr := browser.LaunchBrowser(*config, dryRun, urlInfo.OpenInBackground, restoreSourceApp); launchErr != nil {
 					slog.Error("Failed to start browser", "error", launchErr)
 				}
 
@@ -265,7 +274,7 @@ func handleRuntimeError(err error) {
 }
 
 //export HandleURL
-func HandleURL(url *C.char, name *C.char, bundleId *C.char, path *C.char, windowTitle *C.char, openInBackground C.bool) {
+func HandleURL(url *C.char, name *C.char, bundleId *C.char, path *C.char, windowTitle *C.char, openInBackground C.bool, sourceApplicationPID C.int) {
 	var opener resolver.OpenerInfo
 
 	if name != nil && bundleId != nil && path != nil {
@@ -293,10 +302,17 @@ func HandleURL(url *C.char, name *C.char, bundleId *C.char, path *C.char, window
 	}
 
 	urlListener <- URLInfo{
-		URL:              urlString,
-		Opener:           &opener,
-		OpenInBackground: bool(openInBackground),
+		URL:                  urlString,
+		Opener:               &opener,
+		OpenInBackground:     bool(openInBackground),
+		SourceApplicationPID: int32(sourceApplicationPID),
 	}
+}
+
+func restoreFrontmostApplication(pid int32, targetBundleID string) {
+	cBundleID := C.CString(targetBundleID)
+	defer C.free(unsafe.Pointer(cBundleID))
+	C.RestoreFrontmostApplication(C.int(pid), cBundleID)
 }
 
 //export TestURL

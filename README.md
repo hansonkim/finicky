@@ -23,6 +23,7 @@ Finicky is a macOS application that allows you to set up rules that decide which
 
 - [Installation](#installation)
 - [Basic configuration](#basic-configuration)
+- [Verifying Chrome profile routing](#verifying-chrome-profile-routing)
 - [Configuration](#configuration)
 - [Migrating from Finicky 3](#migrating-from-finicky-3)
 
@@ -70,6 +71,24 @@ export default {
 ```
 
 See the [configuration](#configuration) for all the features Finicky supports.
+
+## Verifying Chrome profile routing
+
+Use an object browser configuration to select a Chrome profile:
+
+```js
+{
+  match: "example.com/*",
+  browser: { name: "Google Chrome", profile: "Work" },
+}
+```
+
+To verify routing without relying on a successful command log:
+
+1. Make a different Chrome profile active.
+2. Open a harmless external URL such as `https://example.com` from a source app covered by the rule.
+3. In the tab that opens, visit `chrome://version` and compare **Profile Path** with the intended profile directory. Chrome profile display names and directory names can differ, for example `Work` and `Profile 1`.
+4. Repeat after making the other profile active. The selected profile path must remain the same.
 
 ## Configuration
 

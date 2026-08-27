@@ -9,10 +9,11 @@
 #include <syslog.h>
 #include <stdbool.h>
 
-extern void HandleURL(char *url, char *name, char *bundleId, char *path, char *windowTitle, bool openInBackground);
+extern void HandleURL(char *url, char *name, char *bundleId, char *path, char *windowTitle, bool openInBackground, int sourceApplicationPID);
 extern void QueueWindowDisplay(int launchedByUser);
 extern void ShowConfigWindow();
 extern char* GetCurrentConfigPath();
+extern void RestoreFrontmostApplication(int pid, const char *targetBundleID);
 
 #ifdef __OBJC__
 @interface BrowseAppDelegate: NSObject<NSApplicationDelegate>
