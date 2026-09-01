@@ -118,11 +118,19 @@ func (cfw *ConfigFileWatcher) GetConfigPath(log bool) (string, error) {
 	return "", fmt.Errorf("no config file found in any of these locations: %s", strings.Join(configPaths, ", "))
 }
 
+// BundleConfig bundles the active JS config. If none exists at a default path,
+// it returns empty paths so callers can fall back to JSON rules.
 func (cfw *ConfigFileWatcher) BundleConfig() (string, string, error) {
 	configPath, err := cfw.GetConfigPath(true)
 
-	if configPath == "" || err != nil {
+	if err != nil {
+		if cfw.customConfigPath == "" {
+			return "", "", nil
+		}
 		return "", "", err
+	}
+	if configPath == "" {
+		return "", "", nil
 	}
 
 	// Check if we can use cached bundle
