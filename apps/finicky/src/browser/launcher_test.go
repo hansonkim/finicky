@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -121,6 +122,25 @@ func TestBrowserInfoMatchesApplicationPathWithSpaces(t *testing.T) {
 	if !matchesBrowser(browser, "/Applications/Google Chrome.app") {
 		t.Fatal("application path did not match Google Chrome")
 	}
+}
+
+func TestEgoLiteIsChromiumProfileBrowser(t *testing.T) {
+	var browsers []browserInfo
+	if err := json.Unmarshal(browsersJsonData, &browsers); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, browser := range browsers {
+		if browser.ID != "com.citrolabs.ego.lite" {
+			continue
+		}
+		if browser.AppName != "ego lite" || browser.Type != "Chromium" || browser.ConfigDirRelative != "Citro Labs/ego lite" {
+			t.Fatalf("Ego Lite browser metadata = %#v", browser)
+		}
+		return
+	}
+
+	t.Fatal("Ego Lite browser metadata is missing")
 }
 
 func TestLaunchBrowserRejectsUnresolvedRequestedProfile(t *testing.T) {
