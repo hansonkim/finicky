@@ -30,6 +30,12 @@
     "app_name": "Chromium"
   },
   {
+    "config_dir_relative": "Citro Labs/ego lite",
+    "id": "com.citrolabs.ego.lite",
+    "type": "Chromium",
+    "app_name": "ego lite"
+  },
+  {
     "config_dir_relative": "Microsoft Edge",
     "id": "com.microsoft.edgemac",
     "type": "Chromium",
