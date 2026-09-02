@@ -54,6 +54,9 @@
   // flags, not defaultBrowser/defaultProfile values above.
   $: defaultBrowserIsCustom = defaultBrowser !== "" && !installedBrowsers.includes(defaultBrowser);
   $: defaultProfileIsCustom = defaultProfile !== "" && !(profilesByBrowser[defaultBrowser] ?? []).includes(defaultProfile);
+  $: if (defaultBrowser && profilesByBrowser[defaultBrowser] === undefined) {
+    window.finicky.sendMessage({ type: "getBrowserProfiles", browser: defaultBrowser });
+  }
 
   function save() {
     if (isJSConfig) return;
